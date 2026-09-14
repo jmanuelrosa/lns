@@ -77,12 +77,13 @@ The tests create and remove symlinks only below temporary directories.
 
 ## Release checklist
 
-1. Run `make check`.
-2. Run `make checksum` and record the SHA-256 digest.
-3. Create the release tag from the reviewed commit.
-4. Upload the checked-in `lns` file as the executable asset.
-5. Download the remote asset and confirm its checksum matches the local file.
-6. Update the dotfiles release label and checksum together.
+1. Ensure the pull request checks, including the GitLeaks and Bearer scans, pass.
+2. Run `make check`.
+3. Run `make checksum` and record the SHA-256 digest.
+4. Create and push the release tag from the reviewed commit.
+5. Let the release workflow verify the tag, rerun the checks, and publish `lns` with `lns.sha256`.
+6. Download the remote asset and confirm its checksum matches the local file.
+7. Update the dotfiles release label and checksum together.
 
 Do not reuse or move a published tag.
 
