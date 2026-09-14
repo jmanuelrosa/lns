@@ -1,0 +1,301 @@
+#!/usr/bin/env fish
+
+function _ui --description "Private output vocabulary"
+    argparse -s -n _ui 'i/indent=' -- $argv
+    or return 1
+
+    if test (count $argv) -eq 0
+        echo "_ui: missing line kind" >&2
+        return 1
+    end
+
+    set -l kind $argv[1]
+    set -l rest $argv[2..-1]
+
+    switch $kind
+        case color
+            set -l stream $rest[2]
+            test -n "$stream"; or set stream compose
+            _ui_code "$rest[1]" "$stream"
+            return 0
+        case color-enabled
+            _ui_colour_on "$rest[1]"
+            return $status
+        case paint
+            set -l code (_ui_code "$rest[1]" compose)
+            set -l reset (_ui_code reset compose)
+            set -l body (string join ' ' -- $rest[2..-1])
+            printf '%s%s%s' "$code" "$body" "$reset"
+            return 0
+        case path
+            string replace -r '^'(string escape --style=regex -- $HOME)'(/|$)' '~$1' -- "$rest[1]"
+            return 0
+        case blank
+            echo
+            return 0
+    end
+
+    set -l text (string join ' ' -- $rest)
+
+    set -l width 0
+    contains -- $kind item note; and set width 2
+    set -q _flag_indent; and set width $_flag_indent
+    set -l pad ""
+    test $width -gt 0; and set pad (string repeat -n $width ' ')
+
+    set -l glyph ""
+    set -l colour ""
+    set -l stream stdout
+    switch $kind
+        case title
+            set colour bold
+        case note
+            set colour dim
+        case step
+            set glyph →
+            set colour cyan
+        case ok
+            set glyph ✓
+            set colour green
+        case warn
+            set glyph ⚠
+            set colour yellow
+        case err
+            set glyph ✗
+            set colour magenta
+            set stream stderr
+        case item
+            set glyph ·
+            set colour dim
+        case done
+            set glyph ✨
+        case '*'
+            echo "_ui: unknown line kind '$kind'" >&2
+            return 1
+    end
+
+    set -l colour_code (_ui_code $colour $stream)
+    set -l reset_code (_ui_code reset $stream)
+
+    if not _ui_colour_on $stream
+        set text (string replace -ra '\e\[[0-9;]*m' '' -- "$text" | string collect)
+    end
+
+    switch $kind
+        case title note
+            printf '%s%s%s%s\n' "$pad" "$colour_code" "$text" "$reset_code"
+        case done
+            printf '%s%s %s\n' "$pad" "$glyph" "$text"
+        case err
+            printf '%s%s%s%s %s\n' "$pad" "$colour_code" "$glyph" "$reset_code" "$text" >&2
+        case '*'
+            printf '%s%s%s%s %s\n' "$pad" "$colour_code" "$glyph" "$reset_code" "$text"
+    end
+end
+
+function _ui_code --description "The escape sequence for one palette colour, or nothing when colour is off" --argument-names name stream
+    test -n "$stream"; or set stream stdout
+    _ui_colour_on $stream; or return 0
+
+    switch $name
+        case reset
+            set_color normal
+        case dim
+            set_color brblack
+        case bold
+            set_color --bold
+        case ''
+            return 0
+        case '*'
+            set_color $name
+    end
+end
+
+function _ui_colour_on --description "True when escape codes should be emitted for a stream" --argument-names stream
+    test -n "$NO_COLOR"; and return 1
+    test -n "$FORCE_COLOR"; and return 0
+    test "$stream" = compose; and return 0
+    isatty $stream
+end
+
+function _lns_excludes --description "Directory names whose links belong to dependencies, caches, or builds"
+    set -l names \
+        node_modules bower_components vendor vendors third_party third-party \
+        deps dependencies submodules Pods Carthage DerivedData \
+        .bun .npm .yarn .pnpm-store .pub-cache .cargo .rustup .m2 .gradle .swiftpm \
+        .venv venv site-packages .tox .stack-work .terraform .nvm .rbenv .pyenv \
+        dist build .build out target .next .nuxt .turbo .svelte-kit .output \
+        .expo .dart_tool .parcel-cache __pycache__ .pytest_cache .mypy_cache \
+        .cache .local Library .Trash .git
+
+    set -a names $CLEAN_CLAUDE_EXCLUDES $argv
+    printf '%s\n' $names
+end
+
+function _lns_confirm --description "Prompt before removing links"
+    read -l -P "$argv[1] " reply
+
+    string match -qir '^y(es)?$' -- $reply; and return 0
+
+    _ui warn "Aborted."
+    return 1
+end
+
+function _lns_target --description "The absolute path a symlink points at, one hop, without following the rest of the chain"
+    set -l link $argv[1]
+    set -l raw (command readlink -- "$link")
+
+    if test -z "$raw"
+        return 1
+    end
+
+    if string match -q '/*' -- $raw
+        path normalize -- "$raw"
+    else
+        path normalize -- (path dirname -- "$link")/"$raw"
+    end
+end
+
+function _lns_usage --description "Print lns usage"
+    echo "Usage: lns [ROOT] [options]"
+    echo
+    echo "List every symlink under ROOT (default: the current directory) with the absolute"
+    echo "path it points at. Read-only unless --remove is given."
+    echo
+    echo "Options"
+    echo "  -c, --contains STRING  only links whose target path contains STRING"
+    echo "  -b, --broken           only links that resolve to nothing"
+    echo "  -r, --remove           remove the listed links, after one confirmation"
+    echo "  -n, --dry-run          with --remove, list what would go and remove nothing"
+    echo "  -y, --yes              skip the confirmation prompt"
+    echo "  -a, --all              include dependency, cache and build trees"
+    echo "  -h, --help             this text"
+    echo
+    echo "--contains matches the target, not the link's own name, so"
+    echo "'lns --contains old-repo --remove' drops every link pointing into a repo you moved."
+    echo "A link is reported and never followed, so the walk cannot descend into a target."
+    echo "Broken links are flagged and are removable like any other; --broken lists only those,"
+    echo "so 'lns --broken --remove' sweeps the dead ones and 'lns -b -c old-repo' narrows to"
+    echo "the dead ones from one target. Unlike --contains, --broken asks about the link and"
+    echo "not its target, so an unreadable link counts as broken."
+    echo "Dependency, cache and build trees (node_modules, .venv, dist, Library, ...) are"
+    echo "skipped unless --all: recursing them means hundreds of node_modules/.bin links."
+    echo "The list comes from clean_claude, so CLEAN_CLAUDE_EXCLUDES extends it here too."
+end
+
+function lns --description "List symlinks under a directory tree, and optionally remove them by what they point at"
+    argparse -n lns h/help 'c/contains=' b/broken r/remove n/dry-run y/yes a/all -- $argv
+    or return 1
+
+    if set -q _flag_help
+        _lns_usage
+        return 0
+    end
+
+    if test (count $argv) -gt 1
+        _lns_usage
+        return 1
+    end
+
+    set -l root (pwd)
+    set -q argv[1]; and set root (path resolve -- $argv[1])
+
+    if not test -d "$root"
+        _ui err "Not a directory: "(_ui path "$root")
+        return 1
+    end
+    if not command -q fd
+        _ui err "lns needs fd (brew install fd)."
+        return 1
+    end
+
+    set -l fd_args
+    if not set -q _flag_all
+        for pattern in (_lns_excludes)
+            set -a fd_args -E $pattern
+        end
+    end
+
+    set -l found (command fd --type l --hidden --no-ignore --absolute-path $fd_args . "$root" 2>/dev/null | string trim -r -c / | command sort)
+
+    set -l links
+    set -l targets
+    for link in $found
+        if set -q _flag_broken
+            test -e "$link"; and continue
+        end
+        set -l target (_lns_target "$link")
+        if set -q _flag_contains
+            string match -q "*$_flag_contains*" -- "$target"; or continue
+        end
+        set -a links "$link"
+        set -a targets "$target"
+    end
+
+    set -l count (count $links)
+    set -l label symlinks
+    test $count -eq 1; and set label symlink
+    set -q _flag_broken; and set label "broken $label"
+
+    set -l descriptors
+    set -q _flag_broken; and set -a descriptors broken
+    set -q _flag_contains; and set -a descriptors "pointing at '$_flag_contains'"
+    set -l matching (string join " and " $descriptors)
+
+    if test $count -eq 0
+        if test -n "$matching"
+            _ui title "🤷 No symlink under "(_ui path "$root")" is $matching."
+            test (count $found) -gt 0; and _ui note (count $found)" found, none matching."
+        else
+            _ui title "🤷 No symlinks under "(_ui path "$root")"."
+        end
+        return 0
+    end
+
+    if test -n "$matching"
+        _ui title "🔎 $count of "(count $found)" symlinks under "(_ui path "$root")", $matching:"
+    else
+        _ui title "🔎 $count $label under "(_ui path "$root")":"
+    end
+
+    for index in (seq $count)
+        if test -z "$targets[$index]"
+            _ui item (_ui path "$links[$index]")(_ui paint dim " → ")(_ui paint yellow "⚠ unreadable")
+            continue
+        end
+        set -l marker ""
+        test -e "$links[$index]"; or set marker "  "(_ui paint yellow "⚠ broken")
+        _ui item (_ui path "$links[$index]")(_ui paint dim " → ")(_ui path "$targets[$index]")"$marker"
+    end
+
+    set -q _flag_all; or _ui note "Dependency and build trees were skipped; --all includes them."
+
+    if not set -q _flag_remove
+        _ui done "$count $label."
+        return 0
+    end
+
+    if set -q _flag_dry_run
+        _ui title "🧪 Dry run: nothing removed."
+        return 0
+    end
+
+    if not set -q _flag_yes
+        _lns_confirm "Remove $count $label? [y/N]"; or return 1
+    end
+
+    set -l removed 0
+    for link in $links
+        test -L "$link"; and command rm "$link" 2>/dev/null; and set removed (math $removed + 1)
+    end
+
+    if test $removed -ne $count
+        _ui warn "Removed $removed of $count $label; the rest survived (permissions?)."
+        return 1
+    end
+
+    _ui done "Removed $removed $label. Targets are untouched."
+end
+
+lns $argv
+exit $status
